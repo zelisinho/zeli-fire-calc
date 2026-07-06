@@ -36,6 +36,34 @@ import {
 // Sample base64 floor plan so users can try it immediately without a file
 import { SAMPLE_FLOOR_PLANS } from "./sample_plans";
 
+async function renderPdfFirstPage(file: File): Promise<{ dataUrl: string; width: number; height: number }> {
+  const pdfjs = await import("pdfjs-dist");
+  const workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
+  pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
+
+  const arrayBuffer = await file.arrayBuffer();
+  const loadingTask = pdfjs.getDocument({ data: new Uint8Array(arrayBuffer) });
+  const pdf = await loadingTask.promise;
+  const page = await pdf.getPage(1);
+  const viewport = page.getViewport({ scale: 2 });
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(viewport.width);
+  canvas.height = Math.round(viewport.height);
+
+  const context = canvas.getContext("2d");
+  if (!context) {
+    throw new Error("Nepodarilo sa pripravit PDF renderer.");
+  }
+
+  await page.render({ canvas, canvasContext: context, viewport }).promise;
+  return {
+    dataUrl: canvas.toDataURL("image/png"),
+    width: canvas.width,
+    height: canvas.height,
+  };
+}
+
 export default function App() {
   // Application state
   const [imageUrl, setImageUrl] = useState<string>(SAMPLE_FLOOR_PLANS[0].url);
@@ -59,7 +87,7 @@ export default function App() {
   const [rooms, setRooms] = useState<Room[]>([
     {
       id: "sample-living",
-      name: "Living Room (Sample Traced)",
+      name: "Obyvacia izba (vzorovy obrys)",
       points: [
         { x: 100, y: 150 },
         { x: 450, y: 150 },
@@ -69,12 +97,12 @@ export default function App() {
       area: 32.5,
       color: "hsla(140, 65%, 72%, 0.4)",
       isAiDetected: false,
-      dimensionsText: "Estimated",
-      notes: "Auto-loaded sample room"
+      dimensionsText: "Odhad",
+      notes: "Automaticky nacitana vzorova miestnost"
     },
     {
       id: "sample-kitchen",
-      name: "Kitchen & Dining (Sample Traced)",
+      name: "Kuchyna a jedalen (vzorovy obrys)",
       points: [
         { x: 480, y: 150 },
         { x: 800, y: 150 },
@@ -84,8 +112,8 @@ export default function App() {
       area: 18.2,
       color: "hsla(30, 65%, 72%, 0.4)",
       isAiDetected: false,
-      dimensionsText: "Estimated",
-      notes: "Auto-loaded sample kitchen area"
+      dimensionsText: "Odhad",
+      notes: "Automaticky nacitana vzorova zona kuchyne"
     }
   ]);
 
@@ -186,6 +214,8 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+
     setFileLoading(true);
     setFileName(file.name);
     setAiResult(null);
@@ -196,15 +226,22 @@ export default function App() {
     setScale({ pixelLength: 0, realLength: 0, unit: unitSystem === "metric" ? "meters" : "feet", isCalibrated: false, points: null });
 
     try {
-      const base64Str = await fileToBase64(file);
-      setImageMime(file.type);
-      setImageUrl(base64Str);
+      if (isPdf) {
+        const rendered = await renderPdfFirstPage(file);
+        setImageMime("image/png");
+        setImageUrl(rendered.dataUrl);
+        setImageSize({ width: rendered.width, height: rendered.height });
+      } else {
+        const base64Str = await fileToBase64(file);
+        setImageMime(file.type);
+        setImageUrl(base64Str);
+      }
 
       // Trigger automatic scaling notification
       setActiveTool("calibrate");
     } catch (err) {
       console.error(err);
-      alert("Failed to load file. Please try a standard image format (PNG, JPG, WEBP).");
+      alert("Subor sa nepodarilo nacitat. Pre PDF sa nacitava prva strana. Skuste PNG, JPG, WEBP alebo standardne PDF.");
     } finally {
       setFileLoading(false);
     }
@@ -239,7 +276,7 @@ export default function App() {
 
       const result: AiAnalysisResult = await response.json();
       if (!result.success) {
-        throw new Error(result.summary || "AI could not properly process the floor plan.");
+        throw new Error(result.summary || "AI nedokazala spravne spracovat podorys.");
       }
 
       // Merge and align with user setting
@@ -253,7 +290,7 @@ export default function App() {
       setUseAiForTotal(true); // Default to AI areas if they are returned successfully
     } catch (err: any) {
       console.error(err);
-      setAiError(err.message || "Failed to communicate with the plan analysis server.");
+      setAiError(err.message || "Nepodarilo sa spojit so serverom pre analyzu podorysu.");
     } finally {
       setAiLoading(false);
     }
@@ -335,12 +372,12 @@ export default function App() {
   // Finish room boundary tracing and save polygon area
   const handleFinishTracing = () => {
     if (currentTracePoints.length < 3) {
-      alert("A room must have at least 3 points to form a polygon area.");
+      alert("Miestnost musi mat aspon 3 body, aby vznikol polygon plochy.");
       return;
     }
 
     if (!scale.isCalibrated) {
-      alert("Please calibrate the drawing scale first to calculate the real-world physical area!");
+      alert("Najprv kalibrujte mierku vykresu, aby bolo mozne vypocitat realnu plochu.");
       return;
     }
 
@@ -355,12 +392,12 @@ export default function App() {
 
     const newRoom: Room = {
       id: generateId(),
-      name: `Room ${rooms.length + 1}`,
+      name: `Miestnost ${rooms.length + 1}`,
       points: currentTracePoints,
       area: physicalArea,
       color: generatePastelColor(),
       isAiDetected: false,
-      dimensionsText: `${currentTracePoints.length} points`,
+      dimensionsText: `${currentTracePoints.length} bodov`,
     };
 
     setRooms((prev) => [...prev, newRoom]);
@@ -387,6 +424,11 @@ export default function App() {
   // Computed total showing on high level
   const totalAreaValue = useAiForTotal && aiResult ? aiResult.totalArea : totalTracedArea;
   const currentUnitSuffix = unitSystem === "metric" ? "sqm" : "sqft";
+  const toolLabelMap: Record<ToolType, string> = {
+    select: "vyber",
+    calibrate: "kalibracia",
+    trace: "obkreslenie",
+  };
 
   // Mouse wheel Zoom handler
   const handleWheel = (e: React.WheelEvent) => {
@@ -419,7 +461,7 @@ export default function App() {
 
   // Format dynamic display summary of scale calibration
   const scaleDisplayString = () => {
-    if (!scale.isCalibrated) return "Not Calibrated";
+    if (!scale.isCalibrated) return "Nekalibrovane";
     const unitLabel = scale.unit === "meters" ? "m" : "ft";
     return `${scale.realLength} ${unitLabel} = ${Math.round(scale.pixelLength)}px`;
   };
@@ -434,12 +476,12 @@ export default function App() {
           </div>
           <div>
             <h1 className="text-lg font-bold tracking-tight text-white flex items-center gap-2">
-              Floor Plan Area Calculator
+              Kalkulacka plochy podorysu
               <span className="text-xs bg-[#334155] text-blue-400 px-2 py-0.5 rounded-full font-normal border border-blue-500/10">
-                Desktop Suite
+                Desktop verzia
               </span>
             </h1>
-            <p className="text-xs text-slate-400">Calculate room boundaries and total floor space with pixel precision & AI</p>
+            <p className="text-xs text-slate-400">Vypocet hranic miestnosti a celkovej podlahovej plochy s pixelovou presnostou a AI</p>
           </div>
         </div>
 
@@ -455,7 +497,7 @@ export default function App() {
                   : "text-slate-400 hover:text-slate-200"
               }`}
             >
-              Metric (m, m²)
+              Metricke (m, m²)
             </button>
             <button
               onClick={() => setUnitSystem("imperial")}
@@ -465,13 +507,13 @@ export default function App() {
                   : "text-slate-400 hover:text-slate-200"
               }`}
             >
-              Imperial (ft, sq ft)
+              Imperialne (ft, sq ft)
             </button>
           </div>
 
           {/* Sample loader */}
           <div className="flex items-center space-x-2">
-            <span className="text-xs text-slate-400 font-medium">Load Sample Plan:</span>
+            <span className="text-xs text-slate-400 font-medium">Nacitat vzorovy podorys:</span>
             {SAMPLE_FLOOR_PLANS.map((sample) => (
               <button
                 key={sample.id}
@@ -497,7 +539,7 @@ export default function App() {
           <div className="space-y-3">
             <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">
               <Upload className="w-3.5 h-3.5 text-blue-400" />
-              1. Import Blueprints
+              1. Import podorysu
             </h3>
             <div className="relative group border-2 border-dashed border-[#475569] hover:border-blue-500 rounded-xl p-4 transition-all text-center bg-[#0f172a]/50">
               <input
@@ -508,8 +550,8 @@ export default function App() {
               />
               <div className="flex flex-col items-center justify-center space-y-2 pointer-events-none">
                 <Upload className="w-8 h-8 text-slate-400 group-hover:text-blue-400 transition-colors" />
-                <span className="text-xs font-semibold text-slate-300">Choose plan drawing</span>
-                <span className="text-[10px] text-slate-500 block">PNG, JPG, WEBP, or PDF</span>
+                <span className="text-xs font-semibold text-slate-300">Vyberte vykres podorysu</span>
+                <span className="text-[10px] text-slate-500 block">PNG, JPG, WEBP alebo PDF</span>
               </div>
             </div>
 
@@ -530,7 +572,7 @@ export default function App() {
           <div className="space-y-3">
             <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">
               <Ruler className="w-3.5 h-3.5 text-blue-400" />
-              2. Custom Scaling Suite
+              2. Nastroje mierky
             </h3>
 
             {/* Scale state indicator */}
@@ -542,13 +584,13 @@ export default function App() {
               <div className="flex items-center justify-between">
                 <span className="font-semibold flex items-center gap-1.5">
                   <span className={`w-2 h-2 rounded-full ${scale.isCalibrated ? "bg-green-400 animate-pulse" : "bg-amber-400"}`}></span>
-                  {scale.isCalibrated ? "Drawing Calibrated" : "Calibration Needed"}
+                  {scale.isCalibrated ? "Podorys je kalibrovany" : "Je potrebna kalibracia"}
                 </span>
                 {scale.isCalibrated && (
                   <button 
                     onClick={handleResetCalibration}
                     className="text-slate-400 hover:text-white hover:bg-[#334155] p-1 rounded transition-colors"
-                    title="Recalibrate"
+                    title="Kalibrovat znova"
                   >
                     <RotateCcw className="w-3.5 h-3.5" />
                   </button>
@@ -556,8 +598,8 @@ export default function App() {
               </div>
               <p className="text-[11px] opacity-80 leading-relaxed">
                 {scale.isCalibrated 
-                  ? `Defined distance: ${scaleDisplayString()}`
-                  : "Calibrate scale to accurately translate drawing pixels into real square footage."}
+                  ? `Definovana vzdialenost: ${scaleDisplayString()}`
+                  : "Kalibrujte mierku, aby sa pixely vo vykrese presne previedli na realnu plochu."}
               </p>
             </div>
 
@@ -577,8 +619,8 @@ export default function App() {
                 <div className="flex items-center space-x-2.5">
                   <Ruler className="w-4 h-4 shrink-0 text-blue-400" />
                   <div>
-                    <div className="text-xs font-semibold">Calibrate Scale</div>
-                    <div className="text-[10px] text-slate-400">Click 2 points on a known length</div>
+                    <div className="text-xs font-semibold">Kalibrovat mierku</div>
+                    <div className="text-[10px] text-slate-400">Kliknite na 2 body znamej vzdialenosti</div>
                   </div>
                 </div>
                 {scale.isCalibrated && <CheckCircle2 className="w-4 h-4 text-green-400 shrink-0" />}
@@ -587,7 +629,7 @@ export default function App() {
               <button
                 onClick={() => {
                   if (!scale.isCalibrated) {
-                    alert("Please calibrate the blueprint scale first using the 'Calibrate Scale' button above!");
+                    alert("Najprv kalibrujte mierku podorysu pomocou tlacidla 'Kalibrovat mierku'.");
                     return;
                   }
                   setActiveTool("trace");
@@ -605,8 +647,8 @@ export default function App() {
                 <div className="flex items-center space-x-2.5">
                   <Scissors className="w-4 h-4 shrink-0 text-emerald-400" />
                   <div>
-                    <div className="text-xs font-semibold">Trace Room Zone</div>
-                    <div className="text-[10px] text-slate-400">Click room corners to construct polygon</div>
+                    <div className="text-xs font-semibold">Obkreslit zonu miestnosti</div>
+                    <div className="text-[10px] text-slate-400">Klikajte na rohy miestnosti pre vytvorenie polygonu</div>
                   </div>
                 </div>
                 {currentTracePoints.length > 0 && (
@@ -630,8 +672,8 @@ export default function App() {
                 <div className="flex items-center space-x-2.5">
                   <Compass className="w-4 h-4 shrink-0 text-slate-400" />
                   <div>
-                    <div className="text-xs font-semibold">Select / Pan View</div>
-                    <div className="text-[10px] text-slate-400">Inspect traced boundaries or move plan</div>
+                    <div className="text-xs font-semibold">Vyber / Posun zobrazenia</div>
+                    <div className="text-[10px] text-slate-400">Skontrolujte obrysy alebo presunte podorys</div>
                   </div>
                 </div>
               </button>
@@ -642,28 +684,28 @@ export default function App() {
           <div className="bg-[#0f172a] rounded-xl p-3.5 border border-[#334155] space-y-2 text-xs">
             <h4 className="font-semibold text-slate-300 flex items-center gap-1.5">
               <HelpCircle className="w-4 h-4 text-blue-400" />
-              Quick Workspace Guide:
+              Rychly navod pracovnej plochy:
             </h4>
             <ul className="space-y-1.5 text-slate-400 text-[11px] list-disc list-inside">
               {activeTool === "calibrate" && (
                 <>
-                  <li className="text-blue-300 font-medium">Click once for the start point</li>
-                  <li className="text-blue-300 font-medium">Click again for the end point</li>
-                  <li>Enter the physical length of that line to calibrate</li>
+                  <li className="text-blue-300 font-medium">Kliknite raz pre zaciatocny bod</li>
+                  <li className="text-blue-300 font-medium">Kliknite znova pre koncovy bod</li>
+                  <li>Zadajte skutocnu dlzku tejto ciary pre kalibraciu</li>
                 </>
               )}
               {activeTool === "trace" && (
                 <>
-                  <li className="text-emerald-300 font-medium">Click on each corner of the room</li>
-                  <li>Click &quot;Complete Zone&quot; below to close the room</li>
-                  <li>You can trace multiple rooms to add them up</li>
+                  <li className="text-emerald-300 font-medium">Kliknite na kazdy roh miestnosti</li>
+                  <li>Kliknite nizsie na &quot;Dokoncit zonu&quot; pre uzavretie miestnosti</li>
+                  <li>Mozete obkreslit viac miestnosti a spocitat ich spolu</li>
                 </>
               )}
               {activeTool === "select" && (
                 <>
-                  <li>Click on any traced room to rename/remove</li>
-                  <li>Hold and drag image to inspect specific zones</li>
-                  <li>Use zoom controls or scroll wheel to zoom</li>
+                  <li>Kliknite na obkreslenu miestnost pre premenovanie/odstranenie</li>
+                  <li>Podrzte a posuvajte obraz pre kontrolu konkretnych zon</li>
+                  <li>Pouzite ovladanie priblizenia alebo koliesko mysi</li>
                 </>
               )}
             </ul>
@@ -673,9 +715,9 @@ export default function App() {
           {activeTool === "trace" && currentTracePoints.length > 0 && (
             <div className="bg-emerald-950/30 border border-emerald-500/25 p-4 rounded-xl space-y-3">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-emerald-400">Tracing Room Area...</span>
+                <span className="text-xs font-semibold text-emerald-400">Obkreslovanie plochy miestnosti...</span>
                 <span className="text-xs bg-emerald-900/50 text-emerald-300 px-2 py-0.5 rounded border border-emerald-500/20">
-                  {currentTracePoints.length} points
+                  {currentTracePoints.length} bodov
                 </span>
               </div>
               <div className="grid grid-cols-2 gap-2">
@@ -683,13 +725,13 @@ export default function App() {
                   onClick={handleFinishTracing}
                   className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 px-3 rounded-lg text-xs shadow-lg transition-colors"
                 >
-                  Complete Zone
+                  Dokoncit zonu
                 </button>
                 <button
                   onClick={() => setCurrentTracePoints([])}
                   className="bg-[#0f172a] hover:bg-slate-800 text-slate-300 py-2 px-3 rounded-lg text-xs border border-[#334155] transition-colors"
                 >
-                  Clear Points
+                  Vymazat body
                 </button>
               </div>
             </div>
@@ -703,14 +745,14 @@ export default function App() {
             <button
               onClick={() => setZoom((z) => Math.min(z + 0.15, 6))}
               className="p-1.5 rounded text-slate-300 hover:bg-[#334155] hover:text-white transition-colors"
-              title="Zoom In"
+              title="Priblizit"
             >
               <ZoomIn className="w-4 h-4" />
             </button>
             <button
               onClick={() => setZoom((z) => Math.max(z - 0.15, 0.2))}
               className="p-1.5 rounded text-slate-300 hover:bg-[#334155] hover:text-white transition-colors"
-              title="Zoom Out"
+              title="Oddialit"
             >
               <ZoomOut className="w-4 h-4" />
             </button>
@@ -721,15 +763,15 @@ export default function App() {
               }}
               className="px-2 py-1 text-[10px] bg-[#0f172a] text-slate-400 hover:text-white rounded border border-[#334155] transition-all"
             >
-              Reset view
+              Reset zobrazenia
             </button>
             <div className="h-4 w-[1px] bg-[#334155]" />
-            <span className="text-[10px] text-slate-300 font-mono pr-2">Zoom: {Math.round(zoom * 100)}%</span>
+            <span className="text-[10px] text-slate-300 font-mono pr-2">Priblizenie: {Math.round(zoom * 100)}%</span>
           </div>
 
           <div className="absolute top-4 right-4 z-20 flex items-center space-x-2">
             <span className="text-xs bg-slate-900/90 backdrop-blur border border-[#334155] px-3 py-1.5 rounded-lg text-slate-300 font-medium">
-              Mode: <span className="text-blue-400 capitalize">{activeTool}</span>
+              Rezim: <span className="text-blue-400 capitalize">{toolLabelMap[activeTool]}</span>
             </span>
           </div>
 
@@ -748,7 +790,7 @@ export default function App() {
             {fileLoading ? (
               <div className="text-center p-8 space-y-3">
                 <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-500 mx-auto"></div>
-                <p className="text-sm text-slate-400">Loading house plan drawing...</p>
+                <p className="text-sm text-slate-400">Nacitavam vykres podorysu...</p>
               </div>
             ) : (
               <div
@@ -763,7 +805,7 @@ export default function App() {
                 <img
                   ref={imageRef}
                   src={imageUrl}
-                  alt="House Floor Plan"
+                  alt="Podorys domu"
                   onLoad={handleImageLoad}
                   className="max-w-none shadow-2xl border-4 border-slate-700 pointer-events-none rounded-sm select-none"
                   style={{ width: `${imageSize.width}px`, height: `${imageSize.height}px` }}
@@ -901,7 +943,7 @@ export default function App() {
                           fontWeight="bold"
                           textAnchor="middle"
                         >
-                          Select end point of known length...
+                          Vyberte koncovy bod znamej vzdialenosti...
                         </text>
                       )}
                     </g>
@@ -917,9 +959,9 @@ export default function App() {
           {/* Quick Stats Banner */}
           <div className="p-6 bg-[#1e293b] border-b border-[#334155] space-y-4">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Total Calculated Area</span>
+              <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Celkova vypocitana plocha</span>
               <span className="text-[10px] bg-blue-500/10 text-blue-400 px-2 py-0.5 rounded-full border border-blue-500/20 font-medium">
-                Live Aggregator
+                Zive scitanie
               </span>
             </div>
 
@@ -929,8 +971,8 @@ export default function App() {
               </div>
               <p className="text-xs text-slate-400">
                 {useAiForTotal && aiResult
-                  ? `Derived from AI floor plan analysis`
-                  : `Summed from ${rooms.length} custom-traced zones`}
+                  ? `Odvodene z AI analyzy podorysu`
+                  : `Sucet z ${rooms.length} vlastnych obkreslenych zon`}
               </p>
             </div>
 
@@ -945,7 +987,7 @@ export default function App() {
                       : "text-slate-400 hover:text-slate-200"
                   }`}
                 >
-                  Custom Tracing ({formatArea(totalTracedArea, currentUnitSuffix)})
+                  Vlastne obkreslenie ({formatArea(totalTracedArea, currentUnitSuffix)})
                 </button>
                 <button
                   onClick={() => setUseAiForTotal(true)}
@@ -955,7 +997,7 @@ export default function App() {
                       : "text-slate-400 hover:text-slate-200"
                   }`}
                 >
-                  AI Estimate ({formatArea(aiResult.totalArea, currentUnitSuffix)})
+                  AI odhad ({formatArea(aiResult.totalArea, currentUnitSuffix)})
                 </button>
               </div>
             )}
@@ -968,7 +1010,7 @@ export default function App() {
               <div className="flex items-center justify-between">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                   <Sparkles className="w-4 h-4 text-blue-400" />
-                  AI Smart Room Extractor
+                  AI extraktor miestnosti
                 </h3>
                 <span className="text-[10px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded">
                   Gemini-3.5
@@ -978,14 +1020,14 @@ export default function App() {
               {!aiResult && !aiLoading && (
                 <div className="bg-[#1e293b] rounded-xl p-4 border border-[#334155] space-y-3">
                   <p className="text-xs text-slate-400 leading-relaxed">
-                    Instantly extract and compile list of rooms, custom dimensions, scales, and areas using Gemini&apos;s architectural vision.
+                    Okamzite ziskajte zoznam miestnosti, rozmerov, mierky a ploch pomocou architektonickej vizie Gemini.
                   </p>
                   <button
                     onClick={handleAiAnalyze}
                     className="w-full flex items-center justify-center space-x-2 py-2.5 px-4 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg shadow-lg shadow-blue-500/10 transition-colors"
                   >
                     <Sparkles className="w-4 h-4" />
-                    <span>Run AI Blueprint Analyzer</span>
+                    <span>Spustit AI analyzu podorysu</span>
                   </button>
                 </div>
               )}
@@ -997,21 +1039,21 @@ export default function App() {
                     <div className="absolute inset-0 rounded-full border-2 border-t-blue-500 animate-spin"></div>
                   </div>
                   <div>
-                    <h4 className="text-xs font-semibold text-white">Gemini is analyzing floor plan...</h4>
-                    <p className="text-[10px] text-slate-400 mt-1">Reading room annotations & calculating areas</p>
+                    <h4 className="text-xs font-semibold text-white">Gemini analyzuje podorys...</h4>
+                    <p className="text-[10px] text-slate-400 mt-1">Citanie anotacii miestnosti a vypocet ploch</p>
                   </div>
                 </div>
               )}
 
               {aiError && (
                 <div className="p-3 bg-red-950/20 border border-red-900/40 rounded-xl text-xs text-red-400">
-                  <span className="font-semibold block mb-1">Analysis Error:</span>
+                  <span className="font-semibold block mb-1">Chyba analyzy:</span>
                   {aiError}
                   <button
                     onClick={handleAiAnalyze}
                     className="mt-2 block text-[10px] text-blue-400 hover:underline font-semibold"
                   >
-                    Try again
+                    Skusit znova
                   </button>
                 </div>
               )}
@@ -1019,9 +1061,9 @@ export default function App() {
               {aiResult && (
                 <div className="space-y-3 bg-[#1e293b] p-4 rounded-xl border border-[#334155]">
                   <div className="flex items-center justify-between text-xs border-b border-[#334155] pb-2">
-                    <span className="text-slate-300 font-semibold">AI Estimator Results</span>
+                    <span className="text-slate-300 font-semibold">Vysledky AI odhadu</span>
                     <span className="bg-green-950 text-green-400 px-2 py-0.5 rounded text-[10px] border border-green-500/10">
-                      Confidence: {aiResult.confidenceLevel}
+                      Dovera: {aiResult.confidenceLevel}
                     </span>
                   </div>
 
@@ -1031,11 +1073,11 @@ export default function App() {
                     </p>
                     <div className="grid grid-cols-2 gap-2 text-[10px] bg-[#0f172a] p-2 rounded">
                       <div>
-                        <span className="text-slate-500 block">Detected Scale</span>
+                        <span className="text-slate-500 block">Detegovana mierka</span>
                         <span className="text-slate-300 font-semibold">{aiResult.detectedScale}</span>
                       </div>
                       <div>
-                        <span className="text-slate-500 block">Dominant Units</span>
+                        <span className="text-slate-500 block">Dominantne jednotky</span>
                         <span className="text-slate-300 font-semibold capitalize">{aiResult.dominantUnit}</span>
                       </div>
                     </div>
@@ -1050,7 +1092,7 @@ export default function App() {
                       >
                         <div>
                           <span className="font-medium text-slate-200 block">{room.name}</span>
-                          <span className="text-[10px] text-slate-400">Dim: {room.dimensions}</span>
+                          <span className="text-[10px] text-slate-400">Rozmer: {room.dimensions}</span>
                         </div>
                         <div className="text-right">
                           <span className="font-bold text-blue-400 block">
@@ -1069,16 +1111,16 @@ export default function App() {
               <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center justify-between">
                 <span className="flex items-center gap-1.5">
                   <Layers className="w-4 h-4 text-emerald-400" />
-                  Traced Room Areas ({rooms.length})
+                  Obkreslene plochy miestnosti ({rooms.length})
                 </span>
-                <span className="text-[10px] text-slate-500">Click workspace regions to highlight</span>
+                <span className="text-[10px] text-slate-500">Kliknite na oblasti pre zvyraznenie</span>
               </h3>
 
               {rooms.length === 0 ? (
                 <div className="bg-[#0f172a]/50 p-6 text-center rounded-xl border border-[#334155] text-xs text-slate-500 space-y-2">
                   <Layers className="w-8 h-8 text-slate-600 mx-auto" />
-                  <p>No room zones traced yet.</p>
-                  <p className="text-[10px] text-slate-400">Use &quot;Trace Room Zone&quot; to calculate custom-drawn floor regions.</p>
+                  <p>Zatial nie su obkreslene ziadne zony miestnosti.</p>
+                  <p className="text-[10px] text-slate-400">Pouzite &quot;Obkreslit zonu miestnosti&quot; pre vypocet vlastnych oblasti podlahy.</p>
                 </div>
               ) : (
                 <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
@@ -1125,7 +1167,7 @@ export default function App() {
                                 handleDeleteRoom(room.id);
                               }}
                               className="text-slate-500 hover:text-red-400 p-1 rounded mt-1.5 transition-colors"
-                              title="Delete Room"
+                              title="Odstranit miestnost"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
@@ -1143,7 +1185,7 @@ export default function App() {
               <div className="pt-2">
                 <button
                   onClick={() => {
-                    const headers = ["Room Name", "Dimensions", "Area", "Area Unit", "Notes"];
+                    const headers = ["Nazov miestnosti", "Rozmery", "Plocha", "Jednotka plochy", "Poznamky"];
                     const rows = rooms.map((r) => [
                       r.name,
                       r.dimensionsText,
@@ -1159,7 +1201,7 @@ export default function App() {
                     const encodedUri = encodeURI(csvContent);
                     const link = document.createElement("a");
                     link.setAttribute("href", encodedUri);
-                    link.setAttribute("download", `Floor_Area_Report_${fileName.split(".")[0]}.csv`);
+                    link.setAttribute("download", `Report_Plochy_${fileName.split(".")[0]}.csv`);
                     document.body.appendChild(link);
                     link.click();
                     document.body.removeChild(link);
@@ -1167,7 +1209,7 @@ export default function App() {
                   className="w-full flex items-center justify-center space-x-2 py-2.5 px-4 bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold rounded-lg border border-[#334155] transition-colors"
                 >
                   <Download className="w-4 h-4 text-blue-400" />
-                  <span>Download Area CSV Report</span>
+                  <span>Stiahnut CSV report plochy</span>
                 </button>
               </div>
             )}
@@ -1182,15 +1224,15 @@ export default function App() {
             <div className="flex items-center space-x-3 text-amber-400 border-b border-[#334155] pb-3">
               <Ruler className="w-6 h-6" />
               <div>
-                <h3 className="text-sm font-bold text-white">Define Calibration Distance</h3>
-                <p className="text-[11px] text-slate-400">Step 2: Enter the real physical size of this line segment</p>
+                <h3 className="text-sm font-bold text-white">Definovat kalibracnu vzdialenost</h3>
+                <p className="text-[11px] text-slate-400">Krok 2: Zadajte skutocnu dlzku tohto useku</p>
               </div>
             </div>
 
             <form onSubmit={handleCalibrateSubmit} className="space-y-4">
               <div className="space-y-2">
                 <label className="text-xs font-semibold text-slate-300 block">
-                  Real world distance ({unitSystem === "metric" ? "meters" : "feet"})
+                  Vzdialenost v reale ({unitSystem === "metric" ? "metre" : "stopy"})
                 </label>
                 <div className="relative">
                   <input
@@ -1200,15 +1242,15 @@ export default function App() {
                     required
                     value={calibrationInputVal}
                     onChange={(e) => setCalibrationInputVal(e.target.value)}
-                    placeholder="e.g. 5"
+                    placeholder="napr. 5"
                     className="w-full bg-[#0f172a] border border-[#334155] rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-blue-500 font-mono"
                   />
                   <span className="absolute right-4 top-3 text-xs text-slate-400 font-semibold capitalize">
-                    {unitSystem === "metric" ? "meters" : "feet"}
+                    {unitSystem === "metric" ? "metre" : "stopy"}
                   </span>
                 </div>
                 <p className="text-[10px] text-slate-400 leading-relaxed pt-1">
-                  We measured a length of <span className="font-semibold text-amber-400">{tempCalibrationPoints.length >= 2 ? Math.round(calculateDistance(tempCalibrationPoints[0], tempCalibrationPoints[1])) : 0} pixels</span> on your plan. This will calibrate the scale multiplier for subsequent area tracing.
+                  Na podoryse sme namerali dlzku <span className="font-semibold text-amber-400">{tempCalibrationPoints.length >= 2 ? Math.round(calculateDistance(tempCalibrationPoints[0], tempCalibrationPoints[1])) : 0} pixelov</span>. Tato hodnota nastavi koeficient mierky pre dalsie obkreslovanie plochy.
                 </p>
               </div>
 
@@ -1221,13 +1263,13 @@ export default function App() {
                   }}
                   className="px-4 py-2 bg-[#0f172a] hover:bg-slate-800 border border-[#334155] rounded-xl text-xs text-slate-300 font-semibold transition-colors"
                 >
-                  Cancel
+                  Zrusit
                 </button>
                 <button
                   type="submit"
                   className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-xl text-xs text-white font-bold transition-all shadow-lg shadow-blue-500/10"
                 >
-                  Set Calibration
+                  Nastavit kalibraciu
                 </button>
               </div>
             </form>
