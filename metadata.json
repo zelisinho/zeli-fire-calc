@@ -1,0 +1,6 @@
+{
+  "name": "Floor Plan Area Calculator",
+  "description": "Upload house plans (images or PDFs) to analyze room dimensions, calibrate scale, trace rooms, and calculate the total floor area with AI assistance.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
