@@ -28,9 +28,7 @@ import {
   generateId,
   generatePastelColor,
   fileToBase64,
-  formatArea,
-  sqmToSqft,
-  sqftToSqm
+  formatArea
 } from "./utils";
 
 // Sample base64 floor plan so users can try it immediately without a file
@@ -86,7 +84,7 @@ export default function App() {
 
   // Calibration and Tracing states
   const [activeTool, setActiveTool] = useState<ToolType>("select");
-  const [unitSystem, setUnitSystem] = useState<UnitSystem>("metric"); // metric (m) or imperial (ft)
+  const unitSystem: UnitSystem = "metric";
   const [scale, setScale] = useState<ScaleCalibration>({
     pixelLength: 0,
     realLength: 0,
@@ -153,43 +151,13 @@ export default function App() {
   const workspaceRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
 
-  // Handle unit system changes
-  useEffect(() => {
-    // Sync scale calibration physical unit when user toggles unit system
-    setScale((prev) => {
-      if (!prev.isCalibrated) return prev;
-      const targetUnit = unitSystem === "metric" ? "meters" : "feet";
-      if (prev.unit === targetUnit) return prev;
-
-      // Convert calibration values
-      const factor = unitSystem === "metric" ? 0.3048 : 3.28084;
-      const newRealLength = parseFloat((prev.realLength * factor).toFixed(2));
-      return {
-        ...prev,
-        realLength: newRealLength,
-        unit: targetUnit,
-      };
-    });
-
-    // Convert room areas of custom traced rooms
-    setRooms((prevRooms) =>
-      prevRooms.map((r) => {
-        const convertedArea = unitSystem === "metric" ? sqftToSqm(r.area) : sqmToSqft(r.area);
-        return {
-          ...r,
-          area: parseFloat(convertedArea.toFixed(2)),
-        };
-      })
-    );
-  }, [unitSystem]);
-
   // Set default calibrated scale for sample floor plan so it works out of the box
   useEffect(() => {
     if (imageUrl === SAMPLE_FLOOR_PLANS[0].url) {
       setScale({
         pixelLength: 350,
         realLength: 8.5,
-        unit: unitSystem === "metric" ? "meters" : "feet",
+        unit: "meters",
         isCalibrated: true,
         points: [
           { x: 100, y: 150 },
@@ -215,7 +183,7 @@ export default function App() {
     setScale({
       pixelLength: 350,
       realLength: sample.id === "villa" ? 8.5 : 12,
-      unit: unitSystem === "metric" ? "meters" : "feet",
+      unit: "meters",
       isCalibrated: true,
       points: [
         { x: 100, y: 150 },
@@ -238,7 +206,7 @@ export default function App() {
     setSelectedRoomId(null);
     setRooms([]);
     setCurrentTracePoints([]);
-    setScale({ pixelLength: 0, realLength: 0, unit: unitSystem === "metric" ? "meters" : "feet", isCalibrated: false, points: null });
+    setScale({ pixelLength: 0, realLength: 0, unit: "meters", isCalibrated: false, points: null });
 
     try {
       if (isPdf) {
@@ -298,13 +266,6 @@ export default function App() {
       const result: AiAnalysisResult = await response.json();
       if (!result.success) {
         throw new Error(result.summary || "AI nedokazala spravne spracovat podorys.");
-      }
-
-      // Merge and align with user setting
-      if (result.dominantUnit === "feet" && unitSystem === "metric") {
-        setUnitSystem("metric");
-      } else if (result.dominantUnit === "meters" && unitSystem === "imperial") {
-        setUnitSystem("imperial");
       }
 
       setAiResult(result);
@@ -367,7 +328,7 @@ export default function App() {
     setScale({
       pixelLength: pixelDist,
       realLength: length,
-      unit: unitSystem === "metric" ? "meters" : "feet",
+      unit: "meters",
       isCalibrated: true,
       points: [p1, p2],
     });
@@ -383,7 +344,7 @@ export default function App() {
     setScale({
       pixelLength: 0,
       realLength: 0,
-      unit: unitSystem === "metric" ? "meters" : "feet",
+      unit: "meters",
       isCalibrated: false,
       points: null,
     });
@@ -439,12 +400,61 @@ export default function App() {
     );
   };
 
+  // Update AI-detected room attributes inline (e.g., dimensions/calculation)
+  const handleUpdateAiRoom = (idx: number, patch: Partial<AiAnalysisResult["rooms"][number]>) => {
+    setAiResult((prev) => {
+      if (!prev) return prev;
+      const nextRooms = prev.rooms.map((room, roomIdx) =>
+        roomIdx === idx ? { ...room, ...patch } : room
+      );
+
+      const nextTotalArea = parseFloat(
+        nextRooms.reduce((sum, room) => sum + (Number.isFinite(room.area) ? room.area : 0), 0).toFixed(2)
+      );
+
+      return { ...prev, rooms: nextRooms, totalArea: nextTotalArea };
+    });
+  };
+
+  const tryParseAreaFromCalculation = (calculation: string): number | null => {
+    const raw = calculation.trim();
+    if (!raw) return null;
+
+    const normalizedForNumber = (val: string) => val.replace(/\s/g, "").replace(/,/g, ".");
+
+    // If user types explicit result after '=' prefer that value.
+    if (raw.includes("=")) {
+      const rhs = raw.split("=").pop()?.trim() || "";
+      const rhsNumber = Number(normalizedForNumber(rhs));
+      if (Number.isFinite(rhsNumber)) {
+        return parseFloat(rhsNumber.toFixed(2));
+      }
+    }
+
+    // Otherwise evaluate the left side arithmetic expression.
+    let expr = raw.split("=")[0].trim();
+    expr = expr.replace(/[xX×]/g, "*");
+    expr = expr.replace(/,/g, "");
+
+    if (!/^[0-9+\-*/().\s]+$/.test(expr)) return null;
+
+    try {
+      const value = Function(`"use strict"; return (${expr});`)();
+      if (typeof value === "number" && Number.isFinite(value)) {
+        return parseFloat(value.toFixed(2));
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
   // Calculate sum of custom-traced areas
   const totalTracedArea = rooms.reduce((sum, r) => sum + r.area, 0);
 
   // Computed total showing on high level
   const totalAreaValue = useAiForTotal && aiResult ? aiResult.totalArea : totalTracedArea;
-  const currentUnitSuffix = unitSystem === "metric" ? "sqm" : "sqft";
+  const currentUnitSuffix = "sqm";
   const toolLabelMap: Record<ToolType, string> = {
     select: "vyber",
     calibrate: "kalibracia",
@@ -508,30 +518,6 @@ export default function App() {
 
         {/* Global Toolbar Controls */}
         <div className="flex items-center space-x-4">
-          {/* Unit Toggle */}
-          <div className="flex items-center bg-[#0f172a] p-1 rounded-lg border border-[#334155]">
-            <button
-              onClick={() => setUnitSystem("metric")}
-              className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-all ${
-                unitSystem === "metric"
-                  ? "bg-blue-600 text-white shadow"
-                  : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              Metricke (m, m²)
-            </button>
-            <button
-              onClick={() => setUnitSystem("imperial")}
-              className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-all ${
-                unitSystem === "imperial"
-                  ? "bg-blue-600 text-white shadow"
-                  : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              Imperialne (ft, sq ft)
-            </button>
-          </div>
-
           {/* Sample loader */}
           <div className="flex items-center space-x-2">
             <span className="text-xs text-slate-400 font-medium">Nacitat vzorovy podorys:</span>
@@ -1135,10 +1121,24 @@ export default function App() {
                             )}
                             <span className="font-medium text-slate-200 block">{room.name}</span>
                           </div>
-                          <span className="text-[10px] text-slate-400">Rozmer: {room.dimensions}</span>
-                          {room.calculation && (
-                            <span className="text-[10px] text-emerald-300 block">Vypocet: {room.calculation}</span>
-                          )}
+                          <span className="text-[10px] text-slate-400 block mt-1">Rozmer: {room.dimensions}</span>
+                          <label className="text-[10px] text-emerald-300 block mt-1">
+                            Vypocet:
+                            <input
+                              type="text"
+                              value={room.calculation || ""}
+                              onChange={(e) => {
+                                const nextCalculation = e.target.value;
+                                const parsedArea = tryParseAreaFromCalculation(nextCalculation);
+                                handleUpdateAiRoom(idx, {
+                                  calculation: nextCalculation,
+                                  ...(parsedArea !== null ? { area: parsedArea } : {}),
+                                });
+                              }}
+                              placeholder="(1025 + 4750) * 4500 / 1,000,000 = 25.99"
+                              className="mt-0.5 w-full bg-[#111827] border border-[#334155] rounded px-2 py-1 text-[10px] text-emerald-200 focus:outline-none focus:border-emerald-500"
+                            />
+                          </label>
                           {room.sourceMethod && (
                             <span className="text-[10px] text-slate-500 block">
                               Zdroj: {room.sourceMethod === "estimated" ? "odhad" : "meranie"}
@@ -1285,7 +1285,7 @@ export default function App() {
             <form onSubmit={handleCalibrateSubmit} className="space-y-4">
               <div className="space-y-2">
                 <label className="text-xs font-semibold text-slate-300 block">
-                  Vzdialenost v reale ({unitSystem === "metric" ? "metre" : "stopy"})
+                  Vzdialenost v reale (metre)
                 </label>
                 <div className="relative">
                   <input
@@ -1299,7 +1299,7 @@ export default function App() {
                     className="w-full bg-[#0f172a] border border-[#334155] rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-blue-500 font-mono"
                   />
                   <span className="absolute right-4 top-3 text-xs text-slate-400 font-semibold capitalize">
-                    {unitSystem === "metric" ? "metre" : "stopy"}
+                    metre
                   </span>
                 </div>
                 <p className="text-[10px] text-slate-400 leading-relaxed pt-1">
