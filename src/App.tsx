@@ -36,6 +36,16 @@ import {
 // Sample base64 floor plan so users can try it immediately without a file
 import { SAMPLE_FLOOR_PLANS } from "./sample_plans";
 
+const AI_MODEL_OPTIONS = [
+  { id: "gemini-3.5-flash", label: "Gemini 3.5 Flash" },
+  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+  { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+  { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
+  { id: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash-Lite" },
+  { id: "gemini-1.5-pro", label: "Gemini 1.5 Pro" },
+  { id: "gemini-1.5-flash", label: "Gemini 1.5 Flash" },
+] as const;
+
 async function renderPdfFirstPage(file: File): Promise<{ dataUrl: string; width: number; height: number }> {
   const pdfjs = await import("pdfjs-dist");
   const workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
@@ -68,6 +78,8 @@ export default function App() {
   // Application state
   const [imageUrl, setImageUrl] = useState<string>(SAMPLE_FLOOR_PLANS[0].url);
   const [imageMime, setImageMime] = useState<string>("image/jpeg");
+  const [analysisFileData, setAnalysisFileData] = useState<string>(SAMPLE_FLOOR_PLANS[0].url);
+  const [analysisMimeType, setAnalysisMimeType] = useState<string>("image/jpeg");
   const [imageSize, setImageSize] = useState<{ width: number; height: number }>({ width: 1200, height: 900 });
   const [fileName, setFileName] = useState<string>("Modern_Villa_Ground_Plan.jpg");
   const [fileLoading, setFileLoading] = useState<boolean>(false);
@@ -130,6 +142,7 @@ export default function App() {
   const [aiLoading, setAiLoading] = useState<boolean>(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [useAiForTotal, setUseAiForTotal] = useState<boolean>(false);
+  const [selectedAiModel, setSelectedAiModel] = useState<string>(AI_MODEL_OPTIONS[0].id);
 
   // View state (Pan & Zoom)
   const [zoom, setZoom] = useState<number>(0.8);
@@ -190,6 +203,8 @@ export default function App() {
   const handleLoadSample = (sample: typeof SAMPLE_FLOOR_PLANS[0]) => {
     setImageUrl(sample.url);
     setImageMime("image/jpeg");
+    setAnalysisFileData(sample.url);
+    setAnalysisMimeType("image/jpeg");
     setFileName(sample.name);
     setAiResult(null);
     setAiError(null);
@@ -227,14 +242,19 @@ export default function App() {
 
     try {
       if (isPdf) {
+        const sourcePdfBase64 = await fileToBase64(file);
         const rendered = await renderPdfFirstPage(file);
         setImageMime("image/png");
         setImageUrl(rendered.dataUrl);
         setImageSize({ width: rendered.width, height: rendered.height });
+        setAnalysisFileData(sourcePdfBase64);
+        setAnalysisMimeType("application/pdf");
       } else {
         const base64Str = await fileToBase64(file);
         setImageMime(file.type);
         setImageUrl(base64Str);
+        setAnalysisFileData(base64Str);
+        setAnalysisMimeType(file.type);
       }
 
       // Trigger automatic scaling notification
@@ -255,7 +275,7 @@ export default function App() {
 
   // Trigger Gemini AI plan analyzer backend API
   const handleAiAnalyze = async () => {
-    if (!imageUrl) return;
+    if (!analysisFileData) return;
     setAiLoading(true);
     setAiError(null);
 
@@ -264,8 +284,9 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          fileData: imageUrl,
-          mimeType: imageMime,
+          fileData: analysisFileData,
+          mimeType: analysisMimeType,
+          model: selectedAiModel,
         }),
       });
 
@@ -1012,9 +1033,20 @@ export default function App() {
                   <Sparkles className="w-4 h-4 text-blue-400" />
                   AI extraktor miestnosti
                 </h3>
-                <span className="text-[10px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded">
-                  Gemini-3.5
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-slate-500">Model</span>
+                  <select
+                    value={selectedAiModel}
+                    onChange={(e) => setSelectedAiModel(e.target.value)}
+                    className="text-[10px] bg-slate-800 text-slate-300 px-2 py-1 rounded border border-[#334155] focus:outline-none focus:border-blue-500"
+                  >
+                    {AI_MODEL_OPTIONS.map((modelOption) => (
+                      <option key={modelOption.id} value={modelOption.id}>
+                        {modelOption.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
 
               {!aiResult && !aiLoading && (
@@ -1040,7 +1072,7 @@ export default function App() {
                   </div>
                   <div>
                     <h4 className="text-xs font-semibold text-white">Gemini analyzuje podorys...</h4>
-                    <p className="text-[10px] text-slate-400 mt-1">Citanie anotacii miestnosti a vypocet ploch</p>
+                    <p className="text-[10px] text-slate-400 mt-1">Model: {selectedAiModel} | Citanie anotacii miestnosti a vypocet ploch</p>
                   </div>
                 </div>
               )}
@@ -1086,13 +1118,32 @@ export default function App() {
                   {/* AI Rooms List */}
                   <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
                     {aiResult.rooms.map((room, idx) => (
+                      (() => {
+                        const fallbackCodeMatch = room.name.match(/\b\d+\.\d+\b/);
+                        const roomCode = room.roomCode || fallbackCodeMatch?.[0] || null;
+                        return (
                       <div
                         key={idx}
                         className="flex items-center justify-between p-2 bg-[#0f172a]/60 rounded text-[11px] border border-[#334155]/50"
                       >
                         <div>
-                          <span className="font-medium text-slate-200 block">{room.name}</span>
+                          <div className="flex items-center gap-1.5">
+                            {roomCode && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/25 font-semibold">
+                                {roomCode}
+                              </span>
+                            )}
+                            <span className="font-medium text-slate-200 block">{room.name}</span>
+                          </div>
                           <span className="text-[10px] text-slate-400">Rozmer: {room.dimensions}</span>
+                          {room.calculation && (
+                            <span className="text-[10px] text-emerald-300 block">Vypocet: {room.calculation}</span>
+                          )}
+                          {room.sourceMethod && (
+                            <span className="text-[10px] text-slate-500 block">
+                              Zdroj: {room.sourceMethod === "estimated" ? "odhad" : "meranie"}
+                            </span>
+                          )}
                         </div>
                         <div className="text-right">
                           <span className="font-bold text-blue-400 block">
@@ -1100,6 +1151,8 @@ export default function App() {
                           </span>
                         </div>
                       </div>
+                        );
+                      })()
                     ))}
                   </div>
                 </div>

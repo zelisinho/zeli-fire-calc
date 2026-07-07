@@ -6,6 +6,16 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
+const SUPPORTED_MODELS = [
+  "gemini-3.5-flash",
+  "gemini-2.5-flash",
+  "gemini-2.5-pro",
+  "gemini-2.0-flash",
+  "gemini-2.0-flash-lite",
+  "gemini-1.5-pro",
+  "gemini-1.5-flash",
+] as const;
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -18,9 +28,14 @@ async function startServer() {
   let aiClient: GoogleGenAI | null = null;
   function getGeminiClient() {
     if (!aiClient) {
-      const apiKey = process.env.GEMINI_API_KEY;
+      const apiKey =
+        process.env.GEMINI_API_KEY ||
+        process.env.GOOGLE_API_KEY ||
+        process.env.GEMINI_KEY;
       if (!apiKey) {
-        throw new Error("GEMINI_API_KEY is not defined in the environment. Please add it to your secrets.");
+        throw new Error(
+          "Missing Gemini API key. Add GEMINI_API_KEY (or GOOGLE_API_KEY) to your .env file and restart the server."
+        );
       }
       aiClient = new GoogleGenAI({
         apiKey,
@@ -37,9 +52,16 @@ async function startServer() {
   // API Route to analyze floor plan image or PDF and compute areas
   app.post("/api/analyze-plan", async (req: express.Request, res: express.Response) => {
     try {
-      const { fileData, mimeType } = req.body;
+      const { fileData, mimeType, model } = req.body;
       if (!fileData || !mimeType) {
         return res.status(400).json({ error: "Missing fileData or mimeType of the floor plan file." });
+      }
+
+      const selectedModel = typeof model === "string" && model.trim().length > 0 ? model.trim() : "gemini-3.5-flash";
+      if (!SUPPORTED_MODELS.includes(selectedModel as typeof SUPPORTED_MODELS[number])) {
+        return res.status(400).json({
+          error: `Unsupported model '${selectedModel}'. Supported: ${SUPPORTED_MODELS.join(", ")}`,
+        });
       }
 
       // Strip off base64 prefix if present
@@ -47,22 +69,26 @@ async function startServer() {
 
       const ai = getGeminiClient();
 
-      const prompt = `You are a professional architectural estimator and floor plan analyzer. 
-Analyze the attached house designer plan (image or PDF) and calculate the total floor area.
-Follow these steps carefully:
-1. Examine the plan for room labels, text annotations, written dimensions (e.g. "12'0\\" x 14'6\\""), or metric annotations (e.g. "4.20 x 3.80").
-2. Search for any scale notations (e.g., "1:100", "1/4\\" = 1'-0\\"") or graphic scale bars.
-3. Identify every distinct room or hallway on the plan.
-4. Extract written dimensions for each room.
-5. Calculate the area for each room in square meters (sqm) or square feet (sqft) depending on the dominant unit on the plan. 
-   - If dimensions are in feet/inches, calculate in square feet.
-   - If dimensions are in meters, calculate in square meters.
-   - If dimensions are not explicitly listed, make an intelligent professional estimation based on standard room sizes (e.g., a standard Master Bed is ~150-200 sqft / 14-18 sqm, Bath is ~40-60 sqft / 4-6 sqm) relative to the scale, and label the confidence as 'low'.
-6. Sum up all individual room areas to calculate the total floor area.
-7. Return a beautifully compiled room list and total area in the specified JSON schema. Set 'success' to true if you could read the plan.`;
+      const prompt = `You are a professional architectural estimator and floor plan analyzer.
+    Analyze the attached house plan (image or PDF first page) and calculate room areas as precisely as possible.
+
+    Priority rules (must follow):
+    1. Detect room identifiers such as "1.01", "1.02", "1.03" and return them in a dedicated roomCode field.
+    2. Prefer explicit written dimensions near each room (especially metric values in mm like "2570" and "2200").
+    3. If dimensions are in mm, compute exact area in m2 using:
+       area_m2 = (length_mm * width_mm) / 1_000_000
+    4. Include the concrete formula used per room in a short calculation string (example: "2570 x 2200 / 1,000,000 = 5.65 m2").
+    5. If dimensions are in feet/inches, compute in sqft and provide the formula.
+    6. Use estimation only when no readable dimensions exist, and mark sourceMethod as "estimated".
+    7. Return all identifiable rooms/zones (including terraces/shelters if present) and a total area.
+
+    Output rules:
+    - Keep numbers realistic and internally consistent.
+    - For mm-based rooms, keep high confidence unless text is unclear.
+    - Set success=true only if at least some rooms were parsed.`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
+        model: selectedModel,
         contents: [
           {
             inlineData: {
@@ -90,10 +116,13 @@ Follow these steps carefully:
                 items: {
                   type: Type.OBJECT,
                   properties: {
+                    roomCode: { type: Type.STRING, description: "Room identifier from drawing/legend (e.g. 1.01, 1.02)." },
                     name: { type: Type.STRING, description: "Room/zone name (e.g. Living Room, Bedroom 1, Hallway, Kitchen)." },
                     dimensions: { type: Type.STRING, description: "Original dimensions text as written on the plan, or 'Estimated' if none." },
                     area: { type: Type.NUMBER, description: "Area of the room in square units (sqm or sqft)." },
                     confidence: { type: Type.STRING, description: "Confidence for this room's calculation: 'high', 'medium', or 'low'." },
+                    calculation: { type: Type.STRING, description: "Short math formula used to compute area for this room." },
+                    sourceMethod: { type: Type.STRING, description: "How area was derived: 'measured' or 'estimated'." },
                     notes: { type: Type.STRING, description: "Explanation or details about the room area calculation." }
                   },
                   required: ["name", "dimensions", "area", "confidence"]

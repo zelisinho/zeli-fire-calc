@@ -23,10 +23,13 @@ export interface ScaleCalibration {
 }
 
 export interface AiRoom {
+  roomCode?: string;
   name: string;
   dimensions: string;
   area: number;
   confidence: string;
+  calculation?: string;
+  sourceMethod?: string;
   notes?: string;
 }
 
