@@ -30,6 +30,10 @@ import {
   fileToBase64,
   formatArea
 } from "./utils";
+import defaultProjectPlanUrl from "../assets/projekt3.png";
+import wallReferenceUrl from "../assets/wall.png";
+import doorReferenceUrl from "../assets/entrance.png";
+import windowReferenceUrl from "../assets/window.png";
 
 // Sample base64 floor plan so users can try it immediately without a file
 import { SAMPLE_FLOOR_PLANS } from "./sample_plans";
@@ -43,6 +47,39 @@ const AI_MODEL_OPTIONS = [
   { id: "gemini-1.5-pro", label: "Gemini 1.5 Pro" },
   { id: "gemini-1.5-flash", label: "Gemini 1.5 Flash" },
 ] as const;
+
+const PERSISTED_PLAN_STORAGE_KEY = "fire-calc:last-plan";
+const DEFAULT_PROJECT_PLAN_NAME = "projekt3.png";
+const CALIBRATION_SNAP_PX = 20;
+
+type PersistedPlanState = {
+  imageUrl: string;
+  imageMime: string;
+  analysisFileData: string;
+  analysisMimeType: string;
+  imageSize: { width: number; height: number };
+  fileName: string;
+};
+
+type ReferenceImagePayload = {
+  label: string;
+  dataUrl: string;
+  mimeType: string;
+};
+
+function getPersistedPlanState(): PersistedPlanState | null {
+  if (typeof window === "undefined") return null;
+
+  try {
+    const raw = window.localStorage.getItem(PERSISTED_PLAN_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PersistedPlanState;
+    if (!parsed?.imageUrl || !parsed?.analysisFileData || !parsed?.fileName) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
 
 async function renderPdfFirstPage(file: File): Promise<{ dataUrl: string; width: number; height: number }> {
   const pdfjs = await import("pdfjs-dist");
@@ -72,15 +109,35 @@ async function renderPdfFirstPage(file: File): Promise<{ dataUrl: string; width:
   };
 }
 
+async function assetUrlToDataUrl(assetUrl: string): Promise<{ dataUrl: string; mimeType: string }> {
+  const response = await fetch(assetUrl);
+  const blob = await response.blob();
+
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(new Error("Nepodarilo sa nacitat predvoleny obrazok projektu."));
+    reader.readAsDataURL(blob);
+  });
+
+  return {
+    dataUrl,
+    mimeType: blob.type || "image/png",
+  };
+}
+
 export default function App() {
+  const persistedPlan = getPersistedPlanState();
+
   // Application state
-  const [imageUrl, setImageUrl] = useState<string>(SAMPLE_FLOOR_PLANS[0].url);
-  const [imageMime, setImageMime] = useState<string>("image/jpeg");
-  const [analysisFileData, setAnalysisFileData] = useState<string>(SAMPLE_FLOOR_PLANS[0].url);
-  const [analysisMimeType, setAnalysisMimeType] = useState<string>("image/jpeg");
-  const [imageSize, setImageSize] = useState<{ width: number; height: number }>({ width: 1200, height: 900 });
-  const [fileName, setFileName] = useState<string>("Modern_Villa_Ground_Plan.jpg");
+  const [imageUrl, setImageUrl] = useState<string>(persistedPlan?.imageUrl || defaultProjectPlanUrl);
+  const [imageMime, setImageMime] = useState<string>(persistedPlan?.imageMime || "image/png");
+  const [analysisFileData, setAnalysisFileData] = useState<string>(persistedPlan?.analysisFileData || "");
+  const [analysisMimeType, setAnalysisMimeType] = useState<string>(persistedPlan?.analysisMimeType || "image/png");
+  const [imageSize, setImageSize] = useState<{ width: number; height: number }>(persistedPlan?.imageSize || { width: 1200, height: 900 });
+  const [fileName, setFileName] = useState<string>(persistedPlan?.fileName || DEFAULT_PROJECT_PLAN_NAME);
   const [fileLoading, setFileLoading] = useState<boolean>(false);
+  const [referenceImages, setReferenceImages] = useState<ReferenceImagePayload[]>([]);
 
   // Calibration and Tracing states
   const [activeTool, setActiveTool] = useState<ToolType>("select");
@@ -88,51 +145,21 @@ export default function App() {
   const [scale, setScale] = useState<ScaleCalibration>({
     pixelLength: 0,
     realLength: 0,
-    unit: "meters",
+    unit: "millimeters",
     isCalibrated: false,
     points: null,
   });
 
   // SVG Custom Traced Rooms
-  const [rooms, setRooms] = useState<Room[]>([
-    {
-      id: "sample-living",
-      name: "Obyvacia izba (vzorovy obrys)",
-      points: [
-        { x: 100, y: 150 },
-        { x: 450, y: 150 },
-        { x: 450, y: 480 },
-        { x: 100, y: 480 }
-      ],
-      area: 32.5,
-      color: "hsla(140, 65%, 72%, 0.4)",
-      isAiDetected: false,
-      dimensionsText: "Odhad",
-      notes: "Automaticky nacitana vzorova miestnost"
-    },
-    {
-      id: "sample-kitchen",
-      name: "Kuchyna a jedalen (vzorovy obrys)",
-      points: [
-        { x: 480, y: 150 },
-        { x: 800, y: 150 },
-        { x: 800, y: 400 },
-        { x: 480, y: 400 }
-      ],
-      area: 18.2,
-      color: "hsla(30, 65%, 72%, 0.4)",
-      isAiDetected: false,
-      dimensionsText: "Odhad",
-      notes: "Automaticky nacitana vzorova zona kuchyne"
-    }
-  ]);
+  const [rooms, setRooms] = useState<Room[]>([]);
 
   const [currentTracePoints, setCurrentTracePoints] = useState<Point[]>([]);
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
 
   // Temp points for scale calibration drag/click
   const [tempCalibrationPoints, setTempCalibrationPoints] = useState<Point[]>([]);
-  const [calibrationInputVal, setCalibrationInputVal] = useState<string>("5");
+  const [calibrationPreviewPoint, setCalibrationPreviewPoint] = useState<Point | null>(null);
+  const [calibrationInputVal, setCalibrationInputVal] = useState<string>("5000");
   const [showCalibrationModal, setShowCalibrationModal] = useState<boolean>(false);
 
   // AI-Assisted Analysis states
@@ -140,7 +167,8 @@ export default function App() {
   const [aiLoading, setAiLoading] = useState<boolean>(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [useAiForTotal, setUseAiForTotal] = useState<boolean>(false);
-  const [selectedAiModel, setSelectedAiModel] = useState<string>(AI_MODEL_OPTIONS[0].id);
+  const [selectedAiModel, setSelectedAiModel] = useState<string>("gemini-2.5-flash");
+  const [selectedAiRoomIdx, setSelectedAiRoomIdx] = useState<number | null>(null);
 
   // View state (Pan & Zoom)
   const [zoom, setZoom] = useState<number>(0.8);
@@ -156,8 +184,8 @@ export default function App() {
     if (imageUrl === SAMPLE_FLOOR_PLANS[0].url) {
       setScale({
         pixelLength: 350,
-        realLength: 8.5,
-        unit: "meters",
+        realLength: 8500,
+        unit: "millimeters",
         isCalibrated: true,
         points: [
           { x: 100, y: 150 },
@@ -167,6 +195,75 @@ export default function App() {
     }
   }, [imageUrl]);
 
+  useEffect(() => {
+    if (persistedPlan || analysisFileData || imageUrl !== defaultProjectPlanUrl) return;
+
+    let isCancelled = false;
+
+    assetUrlToDataUrl(defaultProjectPlanUrl)
+      .then(({ dataUrl, mimeType }) => {
+        if (isCancelled) return;
+        setAnalysisFileData(dataUrl);
+        setAnalysisMimeType(mimeType);
+        setImageMime(mimeType);
+        setFileName(DEFAULT_PROJECT_PLAN_NAME);
+      })
+      .catch((err) => {
+        console.error(err);
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [analysisFileData, imageUrl, persistedPlan]);
+
+  useEffect(() => {
+    let isCancelled = false;
+
+    Promise.all([
+      assetUrlToDataUrl(wallReferenceUrl),
+      assetUrlToDataUrl(doorReferenceUrl),
+      assetUrlToDataUrl(windowReferenceUrl),
+    ])
+      .then(([wallReference, doorReference, windowReference]) => {
+        if (isCancelled) return;
+
+        setReferenceImages([
+          { label: "wall-reference", ...wallReference },
+          { label: "door-reference", ...doorReference },
+          { label: "window-reference", ...windowReference },
+        ]);
+      })
+      .catch((error) => {
+        console.error("Nepodarilo sa nacitat referencne obrazky pre AI.", error);
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !imageUrl || !analysisFileData || !fileName) return;
+
+    const isBundledSample = SAMPLE_FLOOR_PLANS.some((sample) => sample.url === imageUrl);
+    if (isBundledSample) return;
+
+    try {
+      const payload: PersistedPlanState = {
+        imageUrl,
+        imageMime,
+        analysisFileData,
+        analysisMimeType,
+        imageSize,
+        fileName,
+      };
+      window.localStorage.setItem(PERSISTED_PLAN_STORAGE_KEY, JSON.stringify(payload));
+    } catch {
+      // Ignore persistence errors and keep the current session usable.
+    }
+  }, [analysisFileData, analysisMimeType, fileName, imageMime, imageSize, imageUrl]);
+
   // Load selected sample plan
   const handleLoadSample = (sample: typeof SAMPLE_FLOOR_PLANS[0]) => {
     setImageUrl(sample.url);
@@ -175,6 +272,7 @@ export default function App() {
     setAnalysisMimeType("image/jpeg");
     setFileName(sample.name);
     setAiResult(null);
+    setSelectedAiRoomIdx(null);
     setAiError(null);
     setRooms([]);
     setZoom(0.8);
@@ -182,8 +280,8 @@ export default function App() {
     // If it's a sample, set scale calibration automatically so they can draw immediately
     setScale({
       pixelLength: 350,
-      realLength: sample.id === "villa" ? 8.5 : 12,
-      unit: "meters",
+      realLength: sample.id === "villa" ? 8500 : 12000,
+      unit: "millimeters",
       isCalibrated: true,
       points: [
         { x: 100, y: 150 },
@@ -202,11 +300,13 @@ export default function App() {
     setFileLoading(true);
     setFileName(file.name);
     setAiResult(null);
+    setSelectedAiRoomIdx(null);
     setAiError(null);
     setSelectedRoomId(null);
     setRooms([]);
     setCurrentTracePoints([]);
-    setScale({ pixelLength: 0, realLength: 0, unit: "meters", isCalibrated: false, points: null });
+    setScale({ pixelLength: 0, realLength: 0, unit: "millimeters", isCalibrated: false, points: null });
+    setCalibrationPreviewPoint(null);
 
     try {
       if (isPdf) {
@@ -255,6 +355,7 @@ export default function App() {
           fileData: analysisFileData,
           mimeType: analysisMimeType,
           model: selectedAiModel,
+          referenceImages,
         }),
       });
 
@@ -269,7 +370,8 @@ export default function App() {
       }
 
       setAiResult(result);
-      setUseAiForTotal(true); // Default to AI areas if they are returned successfully
+      setSelectedAiRoomIdx(null);
+      setUseAiForTotal(result.rooms.length > 0 && result.totalArea > 0);
     } catch (err: any) {
       console.error(err);
       setAiError(err.message || "Nepodarilo sa spojit so serverom pre analyzu podorysu.");
@@ -294,6 +396,18 @@ export default function App() {
     return { x, y };
   };
 
+  const snapCalibrationPoint = (point: Point, anchor: Point): Point => {
+    const dx = Math.abs(point.x - anchor.x);
+    const dy = Math.abs(point.y - anchor.y);
+    const snapAxisValue = (value: number) => Math.round(value / CALIBRATION_SNAP_PX) * CALIBRATION_SNAP_PX;
+
+    if (dx >= dy) {
+      return { x: snapAxisValue(point.x), y: anchor.y };
+    }
+
+    return { x: anchor.x, y: snapAxisValue(point.y) };
+  };
+
   // Handle Workspace interaction click events
   const handleWorkspaceClick = (e: React.MouseEvent<SVGSVGElement>) => {
     // If panning is active, skip click behaviors
@@ -302,6 +416,15 @@ export default function App() {
     const point = getPlanCoords(e);
 
     if (activeTool === "calibrate") {
+      if (tempCalibrationPoints.length === 1) {
+        const snappedPoint = calibrationPreviewPoint || snapCalibrationPoint(point, tempCalibrationPoints[0]);
+        const newPoints = [...tempCalibrationPoints, snappedPoint];
+        setTempCalibrationPoints(newPoints);
+        setCalibrationPreviewPoint(null);
+        setShowCalibrationModal(true);
+        return;
+      }
+
       const newPoints = [...tempCalibrationPoints, point];
       if (newPoints.length === 1) {
         setTempCalibrationPoints(newPoints);
@@ -328,13 +451,14 @@ export default function App() {
     setScale({
       pixelLength: pixelDist,
       realLength: length,
-      unit: "meters",
+      unit: "millimeters",
       isCalibrated: true,
       points: [p1, p2],
     });
 
     // Reset calibration tools
     setTempCalibrationPoints([]);
+    setCalibrationPreviewPoint(null);
     setShowCalibrationModal(false);
     setActiveTool("trace"); // Prompt user to start tracing zones now!
   };
@@ -344,11 +468,12 @@ export default function App() {
     setScale({
       pixelLength: 0,
       realLength: 0,
-      unit: "meters",
+      unit: "millimeters",
       isCalibrated: false,
       points: null,
     });
     setTempCalibrationPoints([]);
+    setCalibrationPreviewPoint(null);
   };
 
   // Finish room boundary tracing and save polygon area
@@ -366,11 +491,10 @@ export default function App() {
     // Calculate pixel area
     const pixelArea = calculatePolygonPixelArea(currentTracePoints);
 
-    // Convert pixel area to physical area
-    // Scale factor = physical length / pixel distance
-    const scaleFactor = scale.realLength / scale.pixelLength;
-    const physicalAreaFactor = Math.pow(scaleFactor, 2);
-    const physicalArea = parseFloat((pixelArea * physicalAreaFactor).toFixed(2));
+    // Convert pixel area to physical area in m2 using millimeter calibration
+    const scaleFactorMmPerPx = scale.realLength / scale.pixelLength;
+    const physicalAreaMm2 = pixelArea * Math.pow(scaleFactorMmPerPx, 2);
+    const physicalArea = parseFloat((physicalAreaMm2 / 1_000_000).toFixed(2));
 
     const newRoom: Room = {
       id: generateId(),
@@ -453,12 +577,29 @@ export default function App() {
   const totalTracedArea = rooms.reduce((sum, r) => sum + r.area, 0);
 
   // Computed total showing on high level
+  const areaCalculationReady = scale.isCalibrated;
   const totalAreaValue = useAiForTotal && aiResult ? aiResult.totalArea : totalTracedArea;
   const currentUnitSuffix = "sqm";
+  const calibrationQuoteRows =
+    aiResult?.calibrationQuotes?.map((quote) => ({
+      ...quote,
+      mmPerPx: quote.pixelLength > 0 ? quote.quotedLengthMm / quote.pixelLength : null,
+    })) ?? [];
+  const calibrationAverageMmPerPx = (() => {
+    const values = calibrationQuoteRows.map((quote) => quote.mmPerPx).filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    if (values.length === 0) return null;
+
+    return values.reduce((sum, value) => sum + value, 0) / values.length;
+  })();
   const toolLabelMap: Record<ToolType, string> = {
     select: "vyber",
     calibrate: "kalibracia",
     trace: "obkreslenie",
+  };
+
+  const getAiRoomColor = (idx: number): string => {
+    const hue = (idx * 67) % 360;
+    return `hsl(${hue} 88% 60%)`;
   };
 
   // Mouse wheel Zoom handler
@@ -486,6 +627,16 @@ export default function App() {
     }
   };
 
+  const handleCalibrationMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (activeTool !== "calibrate" || tempCalibrationPoints.length !== 1 || isPanning) {
+      if (calibrationPreviewPoint) setCalibrationPreviewPoint(null);
+      return;
+    }
+
+    const point = getPlanCoords(e);
+    setCalibrationPreviewPoint(snapCalibrationPoint(point, tempCalibrationPoints[0]));
+  };
+
   const handleMouseUp = () => {
     setIsPanning(false);
   };
@@ -493,7 +644,7 @@ export default function App() {
   // Format dynamic display summary of scale calibration
   const scaleDisplayString = () => {
     if (!scale.isCalibrated) return "Nekalibrovane";
-    const unitLabel = scale.unit === "meters" ? "m" : "ft";
+    const unitLabel = scale.unit === "millimeters" ? "mm" : "ft";
     return `${scale.realLength} ${unitLabel} = ${Math.round(scale.pixelLength)}px`;
   };
 
@@ -799,6 +950,16 @@ export default function App() {
                 <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-500 mx-auto"></div>
                 <p className="text-sm text-slate-400">Nacitavam vykres podorysu...</p>
               </div>
+            ) : !imageUrl ? (
+              <div className="text-center p-8 space-y-4 max-w-md">
+                <div className="mx-auto w-16 h-16 rounded-2xl border border-dashed border-slate-600 flex items-center justify-center bg-slate-900/40">
+                  <Upload className="w-8 h-8 text-slate-400" />
+                </div>
+                <div className="space-y-1">
+                  <p className="text-base font-semibold text-slate-200">Nahrajte svoj projektovy vykres</p>
+                  <p className="text-sm text-slate-400">Modern Villa uz nie je predvoleny. Po prvom nahrati sa tento vykres stane vasim predvolenym obrazkom.</p>
+                </div>
+              </div>
             ) : (
               <div
                 style={{
@@ -823,6 +984,8 @@ export default function App() {
                   className="absolute inset-0 w-full h-full"
                   viewBox={`0 0 ${imageSize.width} ${imageSize.height}`}
                   onClick={handleWorkspaceClick}
+                  onMouseMove={handleCalibrationMouseMove}
+                  onMouseLeave={() => setCalibrationPreviewPoint(null)}
                 >
                   {/* Render saved Custom Traced Rooms */}
                   {rooms.map((room) => {
@@ -885,6 +1048,62 @@ export default function App() {
                     );
                   })}
 
+                  {/* Render all AI room zones with visible boundaries */}
+                  {aiResult?.rooms.map((room, idx) => {
+                    if (!room.bbox) return null;
+
+                    const roomColor = getAiRoomColor(idx);
+
+                    const nx = Math.max(0, Math.min(1, room.bbox.x));
+                    const ny = Math.max(0, Math.min(1, room.bbox.y));
+                    const nw = Math.max(0.02, Math.min(1 - nx, room.bbox.width));
+                    const nh = Math.max(0.02, Math.min(1 - ny, room.bbox.height));
+
+                    const x = nx * imageSize.width;
+                    const y = ny * imageSize.height;
+                    const w = nw * imageSize.width;
+                    const h = nh * imageSize.height;
+
+                    return (
+                      <g key={`ai-overlay-${idx}`} className="pointer-events-none">
+                        <rect
+                          x={x}
+                          y={y}
+                          width={w}
+                          height={h}
+                          rx={8 / zoom}
+                          fill={roomColor}
+                          fillOpacity={selectedAiRoomIdx === idx ? 0.28 : 0.16}
+                          stroke={selectedAiRoomIdx === idx ? roomColor : `${roomColor}`}
+                          strokeWidth={selectedAiRoomIdx === idx ? 5 / zoom : 3 / zoom}
+                          strokeDasharray={selectedAiRoomIdx === idx ? `${8 / zoom},${6 / zoom}` : `${5 / zoom},${4 / zoom}`}
+                        />
+
+                        <g transform={`translate(${x + w / 2}, ${Math.max(y - 16 / zoom, 18 / zoom)})`}>
+                          <rect
+                            x={-96 / zoom}
+                            y={-12 / zoom}
+                            width={192 / zoom}
+                            height={22 / zoom}
+                            rx={6 / zoom}
+                            fill="rgba(15, 23, 42, 0.95)"
+                            stroke={roomColor}
+                            strokeWidth={1.5 / zoom}
+                          />
+                          <text
+                            textAnchor="middle"
+                            y={3 / zoom}
+                            fill={roomColor}
+                            fontSize={10 / zoom}
+                            fontWeight="bold"
+                          >
+                            {`${room.roomCode || room.name}: ${formatArea(room.area, currentUnitSuffix)}`.slice(0, 48)}
+                          </text>
+                        </g>
+                      </g>
+                    );
+                  })}
+
                   {/* Render active Room Tracing lines in-progress */}
                   {currentTracePoints.length > 0 && (
                     <g>
@@ -941,6 +1160,28 @@ export default function App() {
                           strokeWidth={2 / zoom}
                         />
                       ))}
+                      {tempCalibrationPoints.length === 1 && calibrationPreviewPoint && (
+                        <g>
+                          <line
+                            x1={tempCalibrationPoints[0].x}
+                            y1={tempCalibrationPoints[0].y}
+                            x2={calibrationPreviewPoint.x}
+                            y2={calibrationPreviewPoint.y}
+                            stroke="#f59e0b"
+                            strokeWidth={3 / zoom}
+                            strokeDasharray={`${6 / zoom},${6 / zoom}`}
+                          />
+                          <circle
+                            cx={calibrationPreviewPoint.x}
+                            cy={calibrationPreviewPoint.y}
+                            r={8 / zoom}
+                            fill="#f59e0b"
+                            fillOpacity={0.18}
+                            stroke="#fbbf24"
+                            strokeWidth={2 / zoom}
+                          />
+                        </g>
+                      )}
                       {tempCalibrationPoints.length === 1 && (
                         <text
                           x={tempCalibrationPoints[0].x}
@@ -961,30 +1202,27 @@ export default function App() {
           </div>
         </div>
 
-        {/* Right Dashboard panel (Area Breakdown, AI summary, Room logs) */}
+        {/* Right Dashboard panel (Calibration, AI summary, Room logs) */}
         <div className="w-96 bg-[#111827] border-l border-[#334155] flex flex-col overflow-y-auto shrink-0 shadow-2xl">
-          {/* Quick Stats Banner */}
+          {/* Calibration Status Banner */}
           <div className="p-6 bg-[#1e293b] border-b border-[#334155] space-y-4">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Celkova vypocitana plocha</span>
+              <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Kalibracia podorysu</span>
               <span className="text-[10px] bg-blue-500/10 text-blue-400 px-2 py-0.5 rounded-full border border-blue-500/20 font-medium">
-                Zive scitanie
+                10 kvot
               </span>
             </div>
 
             <div className="space-y-1">
-              <div className="text-4xl font-extrabold tracking-tight text-white flex items-baseline gap-2">
-                {formatArea(totalAreaValue, currentUnitSuffix)}
-              </div>
               <p className="text-xs text-slate-400">
-                {useAiForTotal && aiResult
-                  ? `Odvodene z AI analyzy podorysu`
-                  : `Sucet z ${rooms.length} vlastnych obkreslenych zon`}
+                {aiResult
+                  ? `Kalibracia podorysu: 10 kvót z podorysu v tabuľke.`
+                  : `Spustite AI analyzu a ziskate tabulku 10 vybranych kvót.`}
               </p>
             </div>
 
             {/* Area Source Toggle if AI result is available */}
-            {aiResult && (
+            {areaCalculationReady && aiResult && aiResult.rooms.length > 0 && (
               <div className="grid grid-cols-2 gap-2 bg-[#0f172a] p-1.5 rounded-lg border border-[#334155]">
                 <button
                   onClick={() => setUseAiForTotal(false)}
@@ -1042,7 +1280,11 @@ export default function App() {
                   </p>
                   <button
                     onClick={handleAiAnalyze}
-                    className="w-full flex items-center justify-center space-x-2 py-2.5 px-4 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg shadow-lg shadow-blue-500/10 transition-colors"
+                    disabled={!analysisFileData}
+                    className={`w-full flex items-center justify-center space-x-2 py-2.5 px-4 text-white text-xs font-bold rounded-lg shadow-lg shadow-blue-500/10 transition-colors ${
+                      analysisFileData ? "bg-blue-600 hover:bg-blue-500" : "bg-slate-700 cursor-not-allowed opacity-60"
+                    }`}
+                    title={!analysisFileData ? "Najprv nahravajte podorys" : undefined}
                   >
                     <Sparkles className="w-4 h-4" />
                     <span>Spustit AI analyzu podorysu</span>
@@ -1076,6 +1318,23 @@ export default function App() {
                 </div>
               )}
 
+              {aiResult && calibrationQuoteRows.length > 0 && (
+                <div className="space-y-2 bg-[#1e293b] p-4 rounded-xl border border-[#334155]">
+                  <div className="flex items-center justify-between text-xs border-b border-[#334155] pb-2">
+                    <span className="text-slate-300 font-semibold">Kalibracia podorysu</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-2 text-[10px] bg-[#0f172a] p-2 rounded">
+                    <div>
+                      <span className="text-slate-500 block">Aritmeticky priemer mm/px</span>
+                      <span className="text-slate-300 font-semibold">
+                        {calibrationAverageMmPerPx !== null ? calibrationAverageMmPerPx.toFixed(4) : "Nedostupne"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {aiResult && (
                 <div className="space-y-3 bg-[#1e293b] p-4 rounded-xl border border-[#334155]">
                   <div className="flex items-center justify-between text-xs border-b border-[#334155] pb-2">
@@ -1085,75 +1344,72 @@ export default function App() {
                     </span>
                   </div>
 
-                  <div className="space-y-2">
-                    <p className="text-[11px] text-slate-300 leading-relaxed italic">
-                      &quot;{aiResult.summary}&quot;
-                    </p>
-                    <div className="grid grid-cols-2 gap-2 text-[10px] bg-[#0f172a] p-2 rounded">
-                      <div>
-                        <span className="text-slate-500 block">Detegovana mierka</span>
-                        <span className="text-slate-300 font-semibold">{aiResult.detectedScale}</span>
-                      </div>
-                      <div>
-                        <span className="text-slate-500 block">Dominantne jednotky</span>
-                        <span className="text-slate-300 font-semibold capitalize">{aiResult.dominantUnit}</span>
-                      </div>
+                  <div className="grid grid-cols-2 gap-2 text-[10px] bg-[#0f172a] p-2 rounded">
+                    <div>
+                      <span className="text-slate-500 block">Celkova plocha</span>
+                      <span className="text-slate-300 font-semibold">{formatArea(aiResult.totalArea, currentUnitSuffix)}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 block">Pocet miestnosti</span>
+                      <span className="text-slate-300 font-semibold">{aiResult.rooms.length}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 block">Kalibracia mm/px</span>
+                      <span className="text-slate-300 font-semibold">
+                        {aiResult.calibrationMmPerPixel ? aiResult.calibrationMmPerPixel.toFixed(4) : "Nedostupne"}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 block">Zhoda kalibracie</span>
+                      <span className="text-slate-300 font-semibold">{aiResult.calibrationConsistency ?? 0}%</span>
                     </div>
                   </div>
 
-                  {/* AI Rooms List */}
-                  <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
-                    {aiResult.rooms.map((room, idx) => (
-                      (() => {
+                  <div className="space-y-1.5 max-h-52 overflow-y-auto pr-1">
+                    {aiResult.rooms.length > 0 ? (
+                      aiResult.rooms.map((room, idx) => {
                         const fallbackCodeMatch = room.name.match(/\b\d+\.\d+\b/);
                         const roomCode = room.roomCode || fallbackCodeMatch?.[0] || null;
+                        const isSelectedAiRoom = selectedAiRoomIdx === idx;
+
                         return (
-                      <div
-                        key={idx}
-                        className="flex items-center justify-between p-2 bg-[#0f172a]/60 rounded text-[11px] border border-[#334155]/50"
-                      >
-                        <div>
-                          <div className="flex items-center gap-1.5">
-                            {roomCode && (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/25 font-semibold">
-                                {roomCode}
-                              </span>
-                            )}
-                            <span className="font-medium text-slate-200 block">{room.name}</span>
+                          <div
+                            key={idx}
+                            onClick={() => setSelectedAiRoomIdx(idx)}
+                            className={`flex items-center justify-between p-2 rounded text-[11px] border cursor-pointer transition-all ${
+                              isSelectedAiRoom
+                                ? "bg-blue-900/25 border-blue-400/50"
+                                : "bg-[#0f172a]/60 border-[#334155]/50 hover:border-blue-500/40"
+                            }`}
+                          >
+                            <div>
+                              <div className="flex items-center gap-1.5">
+                                {roomCode && (
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/25 font-semibold">
+                                    {roomCode}
+                                  </span>
+                                )}
+                                <span className="font-medium text-slate-200 block">{room.name}</span>
+                              </div>
+                              <span className="text-[10px] text-slate-400 block mt-1">Rozmer: {room.dimensions}</span>
+                              <span className="text-[10px] text-slate-500 block mt-1">{room.calculation || ""}</span>
+                              {room.sourceMethod && (
+                                <span className="text-[10px] text-slate-500 block">
+                                  Zdroj: {room.sourceMethod === "estimated" ? "odhad" : "meranie"}
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-right">
+                              <span className="font-bold text-blue-400 block">{formatArea(room.area, currentUnitSuffix)}</span>
+                            </div>
                           </div>
-                          <span className="text-[10px] text-slate-400 block mt-1">Rozmer: {room.dimensions}</span>
-                          <label className="text-[10px] text-emerald-300 block mt-1">
-                            Vypocet:
-                            <input
-                              type="text"
-                              value={room.calculation || ""}
-                              onChange={(e) => {
-                                const nextCalculation = e.target.value;
-                                const parsedArea = tryParseAreaFromCalculation(nextCalculation);
-                                handleUpdateAiRoom(idx, {
-                                  calculation: nextCalculation,
-                                  ...(parsedArea !== null ? { area: parsedArea } : {}),
-                                });
-                              }}
-                              placeholder="(1025 + 4750) * 4500 / 1,000,000 = 25.99"
-                              className="mt-0.5 w-full bg-[#111827] border border-[#334155] rounded px-2 py-1 text-[10px] text-emerald-200 focus:outline-none focus:border-emerald-500"
-                            />
-                          </label>
-                          {room.sourceMethod && (
-                            <span className="text-[10px] text-slate-500 block">
-                              Zdroj: {room.sourceMethod === "estimated" ? "odhad" : "meranie"}
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-right">
-                          <span className="font-bold text-blue-400 block">
-                            {formatArea(room.area, currentUnitSuffix)}
-                          </span>
-                        </div>
-                      </div>
                         );
-                      })()
-                    ))}
+                      })
+                    ) : (
+                      <div className="p-3 rounded-lg border border-amber-500/20 bg-amber-500/5 text-[10px] text-amber-200">
+                        AI zatiaľ nevrátila rozpis miestností. Skúste analýzu znova alebo iný model.
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -1285,7 +1541,7 @@ export default function App() {
             <form onSubmit={handleCalibrateSubmit} className="space-y-4">
               <div className="space-y-2">
                 <label className="text-xs font-semibold text-slate-300 block">
-                  Vzdialenost v reale (metre)
+                  Vzdialenost v reale (mm)
                 </label>
                 <div className="relative">
                   <input
@@ -1295,11 +1551,11 @@ export default function App() {
                     required
                     value={calibrationInputVal}
                     onChange={(e) => setCalibrationInputVal(e.target.value)}
-                    placeholder="napr. 5"
+                    placeholder="napr. 5000"
                     className="w-full bg-[#0f172a] border border-[#334155] rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-blue-500 font-mono"
                   />
                   <span className="absolute right-4 top-3 text-xs text-slate-400 font-semibold capitalize">
-                    metre
+                    mm
                   </span>
                 </div>
                 <p className="text-[10px] text-slate-400 leading-relaxed pt-1">

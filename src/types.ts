@@ -17,7 +17,7 @@ export interface Room {
 export interface ScaleCalibration {
   pixelLength: number;     // Distance in pixels on the natural image
   realLength: number;      // Real-world length entered by the user
-  unit: "meters" | "feet"; // The physical units (m or ft)
+  unit: "millimeters" | "feet"; // The physical units (mm or ft)
   isCalibrated: boolean;
   points: [Point, Point] | null; // The two calibration end-points
 }
@@ -30,6 +30,20 @@ export interface AiRoom {
   confidence: string;
   calculation?: string;
   sourceMethod?: string;
+  bbox?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  notes?: string;
+}
+
+export interface CalibrationQuoteSample {
+  label: string;
+  quotedLengthMm: number;
+  pixelLength: number;
+  wallAdjusted?: boolean;
   notes?: string;
 }
 
@@ -38,6 +52,11 @@ export interface AiAnalysisResult {
   detectedScale: string;
   dominantUnit: string; // "meters" or "feet"
   areaUnit: string;     // "sqm" or "sqft"
+  calibrationMmPerPixel?: number;
+  calibrationConsistency?: number;
+  calibrationQuotesUsed?: number;
+  calibrationAttempts?: number;
+  calibrationQuotes?: CalibrationQuoteSample[];
   totalArea: number;
   confidenceLevel: string;
   summary: string;
